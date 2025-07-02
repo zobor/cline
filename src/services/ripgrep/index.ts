@@ -1,8 +1,9 @@
 import * as vscode from "vscode"
 import * as childProcess from "child_process"
 import * as path from "path"
-import * as fs from "fs"
 import * as readline from "readline"
+import { fileExistsAtPath } from "@utils/fs"
+import { ClineIgnoreController } from "@core/ignore/ClineIgnoreController"
 
 /*
 This file provides functionality to perform regex searches on files using ripgrep.
@@ -50,7 +51,7 @@ const isWindows = /^win/.test(process.platform)
 const binName = isWindows ? "rg.exe" : "rg"
 
 interface SearchResult {
-	file: string
+	filePath: string
 	line: number
 	column: number
 	match: string
@@ -60,10 +61,10 @@ interface SearchResult {
 
 const MAX_RESULTS = 300
 
-async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
+export async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
 	const checkPath = async (pkgFolder: string) => {
 		const fullPath = path.join(vscodeAppRoot, pkgFolder, binName)
-		return (await pathExists(fullPath)) ? fullPath : undefined
+		return (await fileExistsAtPath(fullPath)) ? fullPath : undefined
 	}
 
 	return (
@@ -72,14 +73,6 @@ async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
 		(await checkPath("node_modules.asar.unpacked/vscode-ripgrep/bin/")) ||
 		(await checkPath("node_modules.asar.unpacked/@vscode/ripgrep/bin/"))
 	)
-}
-
-async function pathExists(path: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		fs.access(path, (err) => {
-			resolve(err === null)
-		})
-	})
 }
 
 async function execRipgrep(bin: string, args: string[]): Promise<string> {
@@ -122,7 +115,13 @@ async function execRipgrep(bin: string, args: string[]): Promise<string> {
 	})
 }
 
-export async function regexSearchFiles(cwd: string, directoryPath: string, regex: string, filePattern?: string): Promise<string> {
+export async function regexSearchFiles(
+	cwd: string,
+	directoryPath: string,
+	regex: string,
+	filePattern?: string,
+	clineIgnoreController?: ClineIgnoreController,
+): Promise<string> {
 	const vscodeAppRoot = vscode.env.appRoot
 	const rgPath = await getBinPath(vscodeAppRoot)
 
@@ -150,7 +149,7 @@ export async function regexSearchFiles(cwd: string, directoryPath: string, regex
 						results.push(currentResult as SearchResult)
 					}
 					currentResult = {
-						file: parsed.data.path.text,
+						filePath: parsed.data.path.text,
 						line: parsed.data.line_number,
 						column: parsed.data.submatches[0].start,
 						match: parsed.data.lines.text,
@@ -174,8 +173,16 @@ export async function regexSearchFiles(cwd: string, directoryPath: string, regex
 		results.push(currentResult as SearchResult)
 	}
 
-	return formatResults(results, cwd)
+	// Filter results using ClineIgnoreController if provided
+	const filteredResults = clineIgnoreController
+		? results.filter((result) => clineIgnoreController.validateAccess(result.filePath))
+		: results
+
+	return formatResults(filteredResults, cwd)
 }
+
+const MAX_RIPGREP_MB = 0.25
+const MAX_BYTE_SIZE = MAX_RIPGREP_MB * 1024 * 1024 // 0./25MB in bytes
 
 function formatResults(results: SearchResult[], cwd: string): string {
 	const groupedResults: { [key: string]: SearchResult[] } = {}
@@ -189,28 +196,109 @@ function formatResults(results: SearchResult[], cwd: string): string {
 
 	// Group results by file name
 	results.slice(0, MAX_RESULTS).forEach((result) => {
-		const relativeFilePath = path.relative(cwd, result.file)
+		const relativeFilePath = path.relative(cwd, result.filePath)
 		if (!groupedResults[relativeFilePath]) {
 			groupedResults[relativeFilePath] = []
 		}
 		groupedResults[relativeFilePath].push(result)
 	})
 
+	// Track byte size
+	let byteSize = Buffer.byteLength(output, "utf8")
+	let wasLimitReached = false
+
 	for (const [filePath, fileResults] of Object.entries(groupedResults)) {
-		output += `${filePath.toPosix()}\n│----\n`
+		// Check if adding this file's path would exceed the byte limit
+		const filePathString = `${filePath.toPosix()}\n│----\n`
+		const filePathBytes = Buffer.byteLength(filePathString, "utf8")
 
-		fileResults.forEach((result, index) => {
+		if (byteSize + filePathBytes >= MAX_BYTE_SIZE) {
+			wasLimitReached = true
+			break
+		}
+
+		output += filePathString
+		byteSize += filePathBytes
+
+		for (let resultIndex = 0; resultIndex < fileResults.length; resultIndex++) {
+			const result = fileResults[resultIndex]
 			const allLines = [...result.beforeContext, result.match, ...result.afterContext]
-			allLines.forEach((line) => {
-				output += `│${line?.trimEnd() ?? ""}\n`
-			})
 
-			if (index < fileResults.length - 1) {
-				output += "│----\n"
+			// Calculate bytes in all lines for this result
+			let resultBytes = 0
+			const resultLines: string[] = []
+
+			for (const line of allLines) {
+				const trimmedLine = line?.trimEnd() ?? ""
+				const lineString = `│${trimmedLine}\n`
+				const lineBytes = Buffer.byteLength(lineString, "utf8")
+
+				// Check if adding this line would exceed the byte limit
+				if (byteSize + resultBytes + lineBytes >= MAX_BYTE_SIZE) {
+					wasLimitReached = true
+					break
+				}
+
+				resultLines.push(lineString)
+				resultBytes += lineBytes
 			}
-		})
 
-		output += "│----\n\n"
+			// If we hit the limit in the middle of processing lines, break out of the result loop
+			if (wasLimitReached) {
+				break
+			}
+
+			// Add all lines for this result to the output
+			resultLines.forEach((line) => {
+				output += line
+			})
+			byteSize += resultBytes
+
+			// Add separator between results if needed
+			if (resultIndex < fileResults.length - 1) {
+				const separatorString = "│----\n"
+				const separatorBytes = Buffer.byteLength(separatorString, "utf8")
+
+				if (byteSize + separatorBytes >= MAX_BYTE_SIZE) {
+					wasLimitReached = true
+					break
+				}
+
+				output += separatorString
+				byteSize += separatorBytes
+			}
+
+			// Check if we've hit the byte limit
+			if (byteSize >= MAX_BYTE_SIZE) {
+				wasLimitReached = true
+				break
+			}
+		}
+
+		// If we hit the limit, break out of the file loop
+		if (wasLimitReached) {
+			break
+		}
+
+		const closingString = "│----\n\n"
+		const closingBytes = Buffer.byteLength(closingString, "utf8")
+
+		if (byteSize + closingBytes >= MAX_BYTE_SIZE) {
+			wasLimitReached = true
+			break
+		}
+
+		output += closingString
+		byteSize += closingBytes
+	}
+
+	// Add a message if we hit the byte limit
+	if (wasLimitReached) {
+		const truncationMessage = `\n[Results truncated due to exceeding the ${MAX_RIPGREP_MB}MB size limit. Please use a more specific search pattern.]`
+		// Only add the message if it fits within the limit
+		if (byteSize + Buffer.byteLength(truncationMessage, "utf8") < MAX_BYTE_SIZE) {
+			output += truncationMessage
+		}
 	}
 
 	return output.trim()

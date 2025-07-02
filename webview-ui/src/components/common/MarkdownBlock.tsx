@@ -1,10 +1,48 @@
-import { memo, useEffect } from "react"
+import React, { memo, useEffect, useRef, useState } from "react"
+import type { ComponentProps } from "react"
 import { useRemark } from "react-remark"
 import rehypeHighlight, { Options } from "rehype-highlight"
 import styled from "styled-components"
 import { visit } from "unist-util-visit"
-import { useExtensionState } from "../../context/ExtensionStateContext"
-import { CODE_BLOCK_BG_COLOR } from "./CodeBlock"
+import type { Node } from "unist"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import CodeBlock, { CODE_BLOCK_BG_COLOR } from "@/components/common/CodeBlock"
+import MermaidBlock from "@/components/common/MermaidBlock"
+import { WithCopyButton } from "./CopyButton"
+import { StateServiceClient } from "@/services/grpc-client"
+import { PlanActMode, TogglePlanActModeRequest } from "@shared/proto/state"
+
+// Styled component for Act Mode text with more specific styling
+const ActModeHighlight: React.FC = () => {
+	const { chatSettings } = useExtensionState()
+
+	return (
+		<span
+			onClick={() => {
+				// Only toggle to Act mode if we're currently in Plan mode
+				if (chatSettings.mode === "plan") {
+					StateServiceClient.togglePlanActMode(
+						TogglePlanActModeRequest.create({
+							chatSettings: {
+								mode: PlanActMode.ACT,
+								preferredLanguage: chatSettings.preferredLanguage,
+								openAiReasoningEffort: chatSettings.openAIReasoningEffort,
+							},
+						}),
+					)
+				}
+			}}
+			title={chatSettings.mode === "plan" ? "Click to toggle to Act Mode" : "Already in Act Mode"}
+			className={`text-[var(--vscode-textLink-foreground)] inline-flex items-center gap-1 ${
+				chatSettings.mode === "plan" ? "hover:opacity-90 cursor-pointer" : "cursor-default opacity-60"
+			}`}>
+			<div className="p-1 rounded-[12px] bg-[var(--vscode-editor-background)] flex items-center justify-end w-4 border-[1px] border-[var(--vscode-input-border)]">
+				<div className="rounded-full bg-[var(--vscode-textLink-foreground)] w-2 h-2" />
+			</div>
+			Act Mode (⌘⇧A)
+		</span>
+	)
+}
 
 interface MarkdownBlockProps {
 	markdown?: string
@@ -19,7 +57,7 @@ interface MarkdownBlockProps {
  * This caused the entire content to disappear because the structure became invalid.
  */
 const remarkUrlToLink = () => {
-	return (tree: any) => {
+	return (tree: Node) => {
 		// Visit all "text" nodes in the markdown AST (Abstract Syntax Tree)
 		visit(tree, "text", (node: any, index, parent) => {
 			const urlRegex = /https?:\/\/[^\s<>)"]+/g
@@ -50,15 +88,116 @@ const remarkUrlToLink = () => {
 	}
 }
 
+/**
+ * Custom remark plugin that highlights "to Act Mode" mentions and adds keyboard shortcut hint
+ */
+const remarkHighlightActMode = () => {
+	return (tree: Node) => {
+		visit(tree, "text", (node: any, index, parent) => {
+			// Case-insensitive regex to match "to Act Mode" in various capitalizations
+			// Using word boundaries to avoid matching within words
+			// Added negative lookahead to avoid matching if already followed by the shortcut
+			const actModeRegex = /\bto\s+Act\s+Mode\b(?!\s*\(⌘⇧A\))/i
+
+			if (!node.value.match(actModeRegex)) return
+
+			// Split the text by the matches
+			const parts = node.value.split(actModeRegex)
+			const matches = node.value.match(actModeRegex)
+
+			if (!matches || parts.length <= 1) return
+
+			const children: any[] = []
+
+			parts.forEach((part: string, i: number) => {
+				// Add the text before the match
+				if (part) children.push({ type: "text", value: part })
+
+				// Add the match, but only make "Act Mode" bold (not the "to" part)
+				if (matches[i]) {
+					// Extract "to" and "Act Mode" parts
+					const matchText = matches[i]
+					const toIndex = matchText.toLowerCase().indexOf("to")
+					const actModeIndex = matchText.toLowerCase().indexOf("act mode", toIndex + 2)
+
+					if (toIndex !== -1 && actModeIndex !== -1) {
+						// Add "to" as regular text
+						const toPart = matchText.substring(toIndex, actModeIndex).trim()
+						children.push({ type: "text", value: toPart + " " })
+
+						// Add "Act Mode" as bold with keyboard shortcut
+						const actModePart = matchText.substring(actModeIndex)
+						children.push({
+							type: "strong",
+							children: [{ type: "text", value: `${actModePart} (⌘⇧A)` }],
+						})
+					} else {
+						// Fallback if we can't parse it correctly
+						children.push({ type: "text", value: matchText + " " })
+						children.push({
+							type: "strong",
+							children: [{ type: "text", value: `(⌘⇧A)` }],
+						})
+					}
+				}
+			})
+
+			// Replace the original text node with our new nodes
+			if (parent) {
+				parent.children.splice(index, 1, ...children)
+			}
+		})
+	}
+}
+
+/**
+ * Custom remark plugin that prevents filenames with extensions from being parsed as bold text
+ * For example: __init__.py should not be rendered as bold "init" followed by ".py"
+ * Solves https://github.com/cline/cline/issues/1028
+ */
+const remarkPreventBoldFilenames = () => {
+	return (tree: any) => {
+		visit(tree, "strong", (node: any, index: number | undefined, parent: any) => {
+			// Only process if there's a next node (potential file extension)
+			if (!parent || typeof index === "undefined" || index === parent.children.length - 1) return
+
+			const nextNode = parent.children[index + 1]
+
+			// Check if next node is text and starts with . followed by extension
+			if (nextNode.type !== "text" || !nextNode.value.match(/^\.[a-zA-Z0-9]+/)) return
+
+			// If the strong node has multiple children, something weird is happening
+			if (node.children?.length !== 1) return
+
+			// Get the text content from inside the strong node
+			const strongContent = node.children?.[0]?.value
+			if (!strongContent || typeof strongContent !== "string") return
+
+			// Validate that the strong content is a valid filename
+			if (!strongContent.match(/^[a-zA-Z0-9_-]+$/)) return
+
+			// Combine into a single text node
+			const newNode = {
+				type: "text",
+				value: `__${strongContent}__${nextNode.value}`,
+			}
+
+			// Replace both nodes with the combined text node
+			parent.children.splice(index, 2, newNode)
+		})
+	}
+}
+
 const StyledMarkdown = styled.div`
 	pre {
 		background-color: ${CODE_BLOCK_BG_COLOR};
 		border-radius: 3px;
-		margin: 13x 0;
+		margin: 13px 0;
 		padding: 10px 10px;
 		max-width: calc(100vw - 20px);
 		overflow-x: auto;
 		overflow-y: hidden;
+		padding-right: 70px;
 	}
 
 	pre > code {
@@ -156,11 +295,43 @@ const StyledPre = styled.pre<{ theme: any }>`
 			.join("")}
 `
 
+const PreWithCopyButton = ({
+	children,
+	theme,
+	...preProps
+}: { theme: Record<string, string> } & React.HTMLAttributes<HTMLPreElement>) => {
+	const preRef = useRef<HTMLPreElement>(null)
+
+	const handleCopy = () => {
+		if (preRef.current) {
+			const codeElement = preRef.current.querySelector("code")
+			const textToCopy = codeElement ? codeElement.textContent : preRef.current.textContent
+
+			if (!textToCopy) return
+			return textToCopy
+		}
+		return null
+	}
+
+	const styledPreProps = theme ? { ...preProps, theme } : preProps
+
+	return (
+		<WithCopyButton onCopy={handleCopy} position="top-right" ariaLabel="Copy code">
+			<StyledPre {...styledPreProps} ref={preRef}>
+				{children}
+			</StyledPre>
+		</WithCopyButton>
+	)
+}
+
 const MarkdownBlock = memo(({ markdown }: MarkdownBlockProps) => {
 	const { theme } = useExtensionState()
+
 	const [reactContent, setMarkdown] = useRemark({
 		remarkPlugins: [
+			remarkPreventBoldFilenames,
 			remarkUrlToLink,
+			remarkHighlightActMode,
 			() => {
 				return (tree) => {
 					visit(tree, "code", (node: any) => {
@@ -181,7 +352,48 @@ const MarkdownBlock = memo(({ markdown }: MarkdownBlockProps) => {
 		],
 		rehypeReactOptions: {
 			components: {
-				pre: ({ node, ...preProps }: any) => <StyledPre {...preProps} theme={theme} />,
+				pre: ({ children, ...preProps }: React.HTMLAttributes<HTMLPreElement>) => {
+					if (Array.isArray(children) && children.length === 1 && React.isValidElement(children[0])) {
+						const child = children[0] as React.ReactElement<{ className?: string }>
+						if (child.props?.className?.includes("language-mermaid")) {
+							return child
+						}
+					}
+					return (
+						<PreWithCopyButton {...preProps} theme={theme || {}}>
+							{children}
+						</PreWithCopyButton>
+					)
+				},
+				code: (props: ComponentProps<"code">) => {
+					const className = props.className || ""
+					if (className.includes("language-mermaid")) {
+						const codeText = String(props.children || "")
+						return <MermaidBlock code={codeText} />
+					}
+					return <code {...props} />
+				},
+				strong: (props: ComponentProps<"strong">) => {
+					// Check if this is an "Act Mode" strong element by looking for the keyboard shortcut
+					// Handle both string children and array of children cases
+					const childrenText = React.Children.toArray(props.children)
+						.map((child) => {
+							if (typeof child === "string") return child
+							if (typeof child === "object" && "props" in child && child.props.children)
+								return String(child.props.children)
+							return ""
+						})
+						.join("")
+
+					// Case-insensitive check for "Act Mode (⌘⇧A)" pattern
+					// This ensures we only style the exact "Act Mode" mentions with keyboard shortcut
+					// Using case-insensitive flag to catch all capitalization variations
+					if (/^act mode\s*\(⌘⇧A\)$/i.test(childrenText)) {
+						return <ActModeHighlight />
+					}
+
+					return <strong {...props} />
+				},
 			},
 		},
 	})
@@ -191,8 +403,8 @@ const MarkdownBlock = memo(({ markdown }: MarkdownBlockProps) => {
 	}, [markdown, setMarkdown, theme])
 
 	return (
-		<div style={{}}>
-			<StyledMarkdown>{reactContent}</StyledMarkdown>
+		<div>
+			<StyledMarkdown className="ph-no-capture">{reactContent}</StyledMarkdown>
 		</div>
 	)
 })

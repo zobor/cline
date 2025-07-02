@@ -1,7 +1,9 @@
 import * as path from "path"
 import * as os from "os"
 import * as vscode from "vscode"
-import { arePathsEqual } from "../../utils/path"
+import { arePathsEqual } from "@utils/path"
+import { getHostBridgeProvider } from "@/hosts/host-providers"
+import { ShowTextDocumentRequest, ShowTextDocumentOptions } from "@/shared/proto/host/window"
 
 export async function openImage(dataUri: string) {
 	const matches = dataUri.match(/^data:image\/([a-zA-Z]+);base64,(.+)$/)
@@ -13,7 +15,7 @@ export async function openImage(dataUri: string) {
 	const imageBuffer = Buffer.from(base64Data, "base64")
 	const tempFilePath = path.join(os.tmpdir(), `temp_image_${Date.now()}.${format}`)
 	try {
-		await vscode.workspace.fs.writeFile(vscode.Uri.file(tempFilePath), imageBuffer)
+		await vscode.workspace.fs.writeFile(vscode.Uri.file(tempFilePath), new Uint8Array(imageBuffer))
 		await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(tempFilePath))
 	} catch (error) {
 		vscode.window.showErrorMessage(`Error opening image: ${error}`)
@@ -42,7 +44,12 @@ export async function openFile(absolutePath: string) {
 		} catch {} // not essential, sometimes tab operations fail
 
 		const document = await vscode.workspace.openTextDocument(uri)
-		await vscode.window.showTextDocument(document, { preview: false })
+		await getHostBridgeProvider().windowClient.showTextDocument(
+			ShowTextDocumentRequest.create({
+				path: document.uri.fsPath,
+				options: ShowTextDocumentOptions.create({ preview: false }),
+			}),
+		)
 	} catch (error) {
 		vscode.window.showErrorMessage(`Could not open file!`)
 	}

@@ -1,9 +1,14 @@
 export type ApiStream = AsyncGenerator<ApiStreamChunk>
-export type ApiStreamChunk = ApiStreamTextChunk | ApiStreamUsageChunk
+export type ApiStreamChunk = ApiStreamTextChunk | ApiStreamReasoningChunk | ApiStreamUsageChunk
 
 export interface ApiStreamTextChunk {
 	type: "text"
 	text: string
+}
+
+export interface ApiStreamReasoningChunk {
+	type: "reasoning"
+	reasoning: string
 }
 
 export interface ApiStreamUsageChunk {
@@ -12,5 +17,6 @@ export interface ApiStreamUsageChunk {
 	outputTokens: number
 	cacheWriteTokens?: number
 	cacheReadTokens?: number
+	thoughtsTokenCount?: number // openrouter
 	totalCost?: number // openrouter
 }

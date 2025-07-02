@@ -1,3 +1,7 @@
+export const DEFAULT_MCP_TIMEOUT_SECONDS = 60 // matches Anthropic's default timeout in their MCP SDK
+export const MIN_MCP_TIMEOUT_SECONDS = 1
+export type McpMode = "full" | "server-use-only" | "off"
+
 export type McpServer = {
 	name: string
 	config: string
@@ -6,12 +10,15 @@ export type McpServer = {
 	tools?: McpTool[]
 	resources?: McpResource[]
 	resourceTemplates?: McpResourceTemplate[]
+	disabled?: boolean
+	timeout?: number
 }
 
 export type McpTool = {
 	name: string
 	description?: string
 	inputSchema?: object
+	autoApprove?: boolean
 }
 
 export type McpResource = {
@@ -51,6 +58,11 @@ export type McpToolCallResponse = {
 				mimeType: string
 		  }
 		| {
+				type: "audio"
+				data: string
+				mimeType: string
+		  }
+		| {
 				type: "resource"
 				resource: {
 					uri: string
@@ -62,3 +74,41 @@ export type McpToolCallResponse = {
 	>
 	isError?: boolean
 }
+
+export interface McpMarketplaceItem {
+	mcpId: string
+	githubUrl: string
+	name: string
+	author: string
+	description: string
+	codiconIcon: string
+	logoUrl: string
+	category: string
+	tags: string[]
+	requiresApiKey: boolean
+	readmeContent?: string
+	llmsInstallationContent?: string
+	isRecommended: boolean
+	githubStars: number
+	downloadCount: number
+	createdAt: string
+	updatedAt: string
+	lastGithubSync: string
+}
+
+export interface McpMarketplaceCatalog {
+	items: McpMarketplaceItem[]
+}
+
+export interface McpDownloadResponse {
+	mcpId: string
+	githubUrl: string
+	name: string
+	author: string
+	description: string
+	readmeContent: string
+	llmsInstallationContent: string
+	requiresApiKey: boolean
+}
+
+export type McpViewTab = "marketplace" | "addRemote" | "installed"

@@ -1,6 +1,6 @@
 import { memo, useMemo } from "react"
-import { getLanguageFromPath } from "../../utils/getLanguageFromPath"
-import CodeBlock, { CODE_BLOCK_BG_COLOR } from "./CodeBlock"
+import { getLanguageFromPath } from "@/utils/getLanguageFromPath"
+import CodeBlock, { CODE_BLOCK_BG_COLOR } from "@/components/common/CodeBlock"
 
 interface CodeAccordianProps {
 	code?: string
@@ -20,7 +20,7 @@ We need to remove leading non-alphanumeric characters from the path in order for
 [^a-zA-Z0-9]+: Matches one or more characters that are not alphanumeric.
 The replace method removes these matched characters, effectively trimming the string up to the first alphanumeric character.
 */
-export const removeLeadingNonAlphanumeric = (path: string): string => path.replace(/^[^a-zA-Z0-9]+/, "")
+export const cleanPathPrefix = (path: string): string => path.replace(/^[^\u4e00-\u9fa5a-zA-Z0-9]+/, "")
 
 const CodeAccordian = ({
 	code,
@@ -37,6 +37,13 @@ const CodeAccordian = ({
 		() => code && (language ?? (path ? getLanguageFromPath(path) : undefined)),
 		[path, language, code],
 	)
+
+	const numberOfEdits = useMemo(() => {
+		if (code) {
+			return (code.match(/[-]{3,} SEARCH/g) || []).length || undefined
+		}
+		return undefined
+	}, [code])
 
 	return (
 		<div
@@ -90,11 +97,23 @@ const CodeAccordian = ({
 									direction: "rtl",
 									textAlign: "left",
 								}}>
-								{removeLeadingNonAlphanumeric(path ?? "") + "\u200E"}
+								{cleanPathPrefix(path ?? "") + "\u200E"}
 							</span>
 						</>
 					)}
 					<div style={{ flexGrow: 1 }}></div>
+					{numberOfEdits !== undefined && (
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								marginRight: "8px",
+								color: "var(--vscode-descriptionForeground)",
+							}}>
+							<span className="codicon codicon-diff-single" style={{ marginRight: "4px" }}></span>
+							<span>{numberOfEdits}</span>
+						</div>
+					)}
 					<span className={`codicon codicon-chevron-${isExpanded ? "up" : "down"}`}></span>
 				</div>
 			)}

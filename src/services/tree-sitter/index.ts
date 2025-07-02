@@ -1,11 +1,15 @@
 import * as fs from "fs/promises"
 import * as path from "path"
-import { listFiles } from "../glob/list-files"
+import { listFiles } from "@services/glob/list-files"
 import { LanguageParser, loadRequiredLanguageParsers } from "./languageParser"
-import { fileExistsAtPath } from "../../utils/fs"
+import { fileExistsAtPath } from "@utils/fs"
+import { ClineIgnoreController } from "@core/ignore/ClineIgnoreController"
 
 // TODO: implement caching behavior to avoid having to keep analyzing project for new tasks.
-export async function parseSourceCodeForDefinitionsTopLevel(dirPath: string): Promise<string> {
+export async function parseSourceCodeForDefinitionsTopLevel(
+	dirPath: string,
+	clineIgnoreController?: ClineIgnoreController,
+): Promise<string> {
 	// check if the path exists
 	const dirExists = await fileExistsAtPath(path.resolve(dirPath))
 	if (!dirExists) {
@@ -24,10 +28,14 @@ export async function parseSourceCodeForDefinitionsTopLevel(dirPath: string): Pr
 
 	// Parse specific files we have language parsers for
 	// const filesWithoutDefinitions: string[] = []
-	for (const file of filesToParse) {
-		const definitions = await parseFile(file, languageParsers)
+
+	// Filter filepaths for access if controller is provided
+	const allowedFilesToParse = clineIgnoreController ? clineIgnoreController.filterPaths(filesToParse) : filesToParse
+
+	for (const filePath of allowedFilesToParse) {
+		const definitions = await parseFile(filePath, languageParsers, clineIgnoreController)
 		if (definitions) {
-			result += `${path.relative(dirPath, file).toPosix()}\n${definitions}\n`
+			result += `${path.relative(dirPath, filePath).toPosix()}\n${definitions}\n`
 		}
 		// else {
 		// 	filesWithoutDefinitions.push(file)
@@ -76,6 +84,8 @@ function separateFiles(allFiles: string[]): {
 		"java",
 		"php",
 		"swift",
+		// Kotlin
+		"kt",
 	].map((e) => `.${e}`)
 	const filesToParse = allFiles.filter((file) => extensions.includes(path.extname(file))).slice(0, 50) // 50 files max
 	const remainingFiles = allFiles.filter((file) => !filesToParse.includes(file))
@@ -98,7 +108,14 @@ This approach allows us to focus on the most relevant parts of the code (defined
 - https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/test/helper.js
 - https://tree-sitter.github.io/tree-sitter/code-navigation-systems
 */
-async function parseFile(filePath: string, languageParsers: LanguageParser): Promise<string | undefined> {
+async function parseFile(
+	filePath: string,
+	languageParsers: LanguageParser,
+	clineIgnoreController?: ClineIgnoreController,
+): Promise<string | null> {
+	if (clineIgnoreController && !clineIgnoreController.validateAccess(filePath)) {
+		return null
+	}
 	const fileContent = await fs.readFile(filePath, "utf8")
 	const ext = path.extname(filePath).toLowerCase().slice(1)
 
@@ -140,7 +157,7 @@ async function parseFile(filePath: string, languageParsers: LanguageParser): Pro
 				formattedOutput += "|----\n"
 			}
 			// Only add the first line of the definition
-			// query captures includes the definition name and the definition implementation, but we only want the name (I found discrepencies in the naming structure for various languages, i.e. javascript names would be 'name' and typescript names would be 'name.definition)
+			// query captures includes the definition name and the definition implementation, but we only want the name (I found discrepancies in the naming structure for various languages, i.e. javascript names would be 'name' and typescript names would be 'name.definition)
 			if (name.includes("name") && lines[startLine]) {
 				formattedOutput += `│${lines[startLine]}\n`
 			}
@@ -159,5 +176,5 @@ async function parseFile(filePath: string, languageParsers: LanguageParser): Pro
 	if (formattedOutput.length > 0) {
 		return `|----\n${formattedOutput}|----\n`
 	}
-	return undefined
+	return null
 }

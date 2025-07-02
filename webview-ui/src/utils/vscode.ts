@@ -1,4 +1,4 @@
-import { WebviewMessage } from "../../../src/shared/WebviewMessage"
+import { WebviewMessage } from "@shared/WebviewMessage"
 import type { WebviewApi } from "vscode-webview"
 
 /**
@@ -10,6 +10,13 @@ import type { WebviewApi } from "vscode-webview"
  * dev server by using native web browser features that mock the functionality
  * enabled by acquireVsCodeApi.
  */
+declare global {
+	interface Window {
+		__is_standalone__?: boolean
+		standalonePostMessage?: (event: any) => void
+	}
+}
+
 class VSCodeAPIWrapper {
 	private readonly vsCodeApi: WebviewApi<unknown> | undefined
 
@@ -27,13 +34,21 @@ class VSCodeAPIWrapper {
 	 * @remarks When running webview code inside a web browser, postMessage will instead
 	 * log the given message to the console.
 	 *
-	 * @param message Abitrary data (must be JSON serializable) to send to the extension context.
+	 * @param message Arbitrary data (must be JSON serializable) to send to the extension context.
 	 */
 	public postMessage(message: WebviewMessage) {
 		if (this.vsCodeApi) {
 			this.vsCodeApi.postMessage(message)
+		} else if (window.__is_standalone__) {
+			if (!window.standalonePostMessage) {
+				console.warn("Standalone postMessage not found.")
+				return
+			}
+			const json = JSON.stringify(message)
+			console.log("Standalone postMessage: " + json.slice(0, 200))
+			window.standalonePostMessage(json)
 		} else {
-			console.log(message)
+			console.log("postMessage fallback: ", message)
 		}
 	}
 
